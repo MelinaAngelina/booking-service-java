@@ -105,8 +105,10 @@ public class Booking {
     }
 
 
+    /**
+     * Начать отмену и сохранить данные, необходимые для компенсации.
+     */
     public void beginCancellation(OffsetDateTime now) {
-
         switch (status) {
             case AWAIT_CONFIRMATION:
                 this.previousStatus = status;
@@ -114,7 +116,7 @@ public class Booking {
                 this.commandSentAt = now;
                 break;
             case CONFIRMED:
-                if (now.toLocalDate().isBefore(bookedFrom)){
+                if (now.toLocalDate().isBefore(bookedFrom)) {
                     this.previousStatus = status;
                     this.status = BookingStatus.CANCELLATION_PENDING;
                     this.commandSentAt = now;
@@ -128,10 +130,12 @@ public class Booking {
             default:
                 throw new BusinessException("Некорректный статус для отмены");
         }
-
     }
 
 
+    /**
+     * Восстановить состояние, которое было до начала отмены.
+     */
     public void rollbackCancellation() {
         if (status != BookingStatus.CANCELLATION_PENDING) {
             throw new BusinessException("Статус бронирования некорректен, бронирование должно находиться в статусе отмены");
@@ -145,7 +149,23 @@ public class Booking {
     }
 
     /**
-     * Отменить бронирование с учетом бизнес-правил
+     * Завершить отмену после подтверждения от Catalog Service.
+     */
+    public void completeCancellation() {
+        if (status != BookingStatus.CANCELLATION_PENDING) {
+            throw new BusinessException(
+                    "Статус бронирования некорректен, бронирование должно находиться в статусе отмены"
+            );
+        }
+        this.status = BookingStatus.CANCELLED;
+        this.previousStatus = null;
+        this.commandSentAt = null;
+    }
+
+    /**
+     * Обработать отказ Catalog Service.
+     * Для новой заявки отказ завершает создание, а для ожидающей отмены
+     * подтверждает успешное завершение отмены.
      */
     public void cancel(LocalDate currentDate) {
         switch (status) {
@@ -158,6 +178,9 @@ public class Booking {
                 } else {
                     throw new BusinessException("Невозможно отменить начавшееся бронирование");
                 }
+                break;
+            case CANCELLATION_PENDING:
+                completeCancellation();
                 break;
             case NONE:
             case CANCELLED:

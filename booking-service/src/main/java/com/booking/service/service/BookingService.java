@@ -79,8 +79,6 @@ public class BookingService {
 
         bookingRepository.save(booking);
 
-        log.info("Перед отправкой отмены catalogRequestId={}", booking.getCatalogRequestId());
-
         if (booking.getCatalogRequestId() != null) {
             CancelBookingJobByRequestIdRequest command = new CancelBookingJobByRequestIdRequest(
                     UUID.randomUUID(),
@@ -198,9 +196,20 @@ public class BookingService {
     @Transactional
     public void handleError(UUID requestId) {
         log.info("Получено событие ошибки из DLQ: requestId={}", requestId);
+
         Booking booking = bookingRepository.findByCatalogRequestId(requestId).orElse(null);
+
         if (booking == null) {
             log.warn("Бронирование не найдено по requestId: {}. Событие проигнорировано.", requestId);
+            return;
+        }
+
+        if (booking.getStatus() != BookingStatus.CANCELLATION_PENDING) {
+            log.warn(
+                    "Бронирование id={} находится в статусе {}. Откат отмены не требуется, событие проигнорировано.",
+                    booking.getId(),
+                    booking.getStatus()
+            );
             return;
         }
         booking.rollbackCancellation();
