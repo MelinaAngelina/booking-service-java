@@ -25,7 +25,12 @@ public enum BookingStatus {
     /**
      * Отменено (3)
      */
-    CANCELLED(3);
+    CANCELLED(3),
+
+    /**
+     * Ожидает результата отмены в Catalog Service (4)
+     */
+    CANCELLATION_PENDING(4);
 
     private final int value;
 

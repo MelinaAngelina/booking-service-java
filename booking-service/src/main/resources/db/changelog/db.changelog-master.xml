@@ -46,4 +46,13 @@
         </createIndex>
     </changeSet>
 
+    <changeSet id="2" author="booking-service">
+        <addColumn tableName="bookings">
+            <column name="previous_status" type="INTEGER"/>
+            <column name="command_sent_at" type="TIMESTAMP WITH TIME ZONE"/>
+
+        </addColumn>
+
+    </changeSet>
+
 </databaseChangeLog>
