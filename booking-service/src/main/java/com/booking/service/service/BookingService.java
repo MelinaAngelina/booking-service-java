@@ -1,6 +1,8 @@
 package com.booking.service.service;
 
 import com.booking.service.config.CurrentDateTimeProvider;
+import com.booking.service.dto.response.BookingStatisticsResponse;
+import com.booking.service.dto.response.TopResourceResponse;
 import com.booking.service.entity.Booking;
 import com.booking.service.entity.BookingStatus;
 import com.booking.service.exception.BusinessException;
@@ -8,6 +10,8 @@ import com.booking.service.messaging.contracts.CancelBookingJobByRequestIdReques
 import com.booking.service.messaging.contracts.CreateBookingJobRequest;
 import com.booking.service.messaging.listener.BookingEventPublisher;
 import com.booking.service.repository.BookingRepository;
+import com.booking.service.repository.projection.BookingCountByStatusProjection;
+import com.booking.service.repository.projection.TopResourceProjection;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
@@ -17,7 +21,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -131,6 +138,52 @@ public class BookingService {
     @Transactional(readOnly = true)
     public BookingStatus getStatusById(Long id) {
         return bookingRepository.findStatusById(id);
+    }
+
+    /**
+     * Получить агрегированную статистику по бронированиям:
+     * общее количество, количество по статусам и топ-5 ресурсов.
+     *
+     * @return статистика по бронированиям
+     */
+    @Transactional(readOnly = true)
+    public BookingStatisticsResponse getStatistics() {
+        long totalCount = bookingRepository.count();
+
+        List<BookingCountByStatusProjection> statusCounts =
+                bookingRepository.countBookingsByStatus();
+
+        Map<BookingStatus, Long> countByStatus =
+                new EnumMap<>(BookingStatus.class);
+
+        for (BookingCountByStatusProjection statusCount : statusCounts) {
+            countByStatus.put(
+                    statusCount.getStatus(),
+                    statusCount.getBookingCount()
+            );
+        }
+
+        Pageable topFive = PageRequest.of(0, 5);
+
+        List<TopResourceProjection> topResourceProjections =
+                bookingRepository.findTopResources(topFive);
+
+        List<TopResourceResponse> topResources = new ArrayList<>();
+
+        for (TopResourceProjection projection : topResourceProjections) {
+            topResources.add(
+                    new TopResourceResponse(
+                            projection.getResourceId(),
+                            projection.getBookingCount()
+                    )
+            );
+        }
+
+        return new BookingStatisticsResponse(
+                totalCount,
+                countByStatus,
+                topResources
+        );
     }
 
     // === EVENT HANDLERS (Обработка асинхронных событий от Catalog Service) ===

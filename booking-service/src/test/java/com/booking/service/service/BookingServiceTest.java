@@ -1,17 +1,23 @@
 package com.booking.service.service;
 
+import com.booking.service.dto.response.BookingStatisticsResponse;
+import com.booking.service.dto.response.TopResourceResponse;
 import com.booking.service.entity.Booking;
 import com.booking.service.entity.BookingStatus;
 import com.booking.service.messaging.contracts.CancelBookingJobByRequestIdRequest;
 import com.booking.service.messaging.listener.BookingEventPublisher;
 import com.booking.service.repository.BookingRepository;
+import com.booking.service.repository.projection.BookingCountByStatusProjection;
+import com.booking.service.repository.projection.TopResourceProjection;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.data.domain.Pageable;
 
 import java.lang.reflect.Proxy;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -90,6 +96,42 @@ class BookingServiceTest {
         assertEquals(0, repositoryStub.saveCount());
     }
 
+    @Test
+    void getStatistics_returnsAggregatedStatistics() {
+        repositoryStub.setStatistics(
+                10L,
+                List.of(
+                        new BookingCountByStatusProjectionStub(BookingStatus.CONFIRMED, 6L),
+                        new BookingCountByStatusProjectionStub(BookingStatus.CANCELLED, 4L)
+                ),
+                List.of(
+                        new TopResourceProjectionStub(2L, 5L),
+                        new TopResourceProjectionStub(7L, 3L)
+                )
+        );
+
+        BookingStatisticsResponse result = bookingService.getStatistics();
+
+        assertEquals(10L, result.totalCount());
+        assertEquals(6L, result.countByStatus().get(BookingStatus.CONFIRMED));
+        assertEquals(4L, result.countByStatus().get(BookingStatus.CANCELLED));
+        assertEquals(2, result.topResources().size());
+        assertEquals(new TopResourceResponse(2L, 5L), result.topResources().get(0));
+        assertEquals(0, repositoryStub.requestedPageable().getPageNumber());
+        assertEquals(5, repositoryStub.requestedPageable().getPageSize());
+    }
+
+    @Test
+    void getStatistics_forEmptyRepository_returnsEmptyStatistics() {
+        repositoryStub.setStatistics(0L, List.of(), List.of());
+
+        BookingStatisticsResponse result = bookingService.getStatistics();
+
+        assertEquals(0L, result.totalCount());
+        assertEquals(Map.of(), result.countByStatus());
+        assertEquals(List.of(), result.topResources());
+    }
+
     private Booking createBooking() {
         Booking booking = Booking.create(
                 1L,
@@ -124,6 +166,10 @@ class BookingServiceTest {
 
         private final Map<Long, Booking> bookingsById = new HashMap<>();
         private int saveCount;
+        private long totalCount;
+        private List<BookingCountByStatusProjection> statusCounts = List.of();
+        private List<TopResourceProjection> topResources = List.of();
+        private Pageable requestedPageable;
 
         private BookingRepository repository() {
             return (BookingRepository) Proxy.newProxyInstance(
@@ -137,6 +183,12 @@ class BookingServiceTest {
                         case "save" -> {
                             saveCount++;
                             yield args[0];
+                        }
+                        case "count" -> totalCount;
+                        case "countBookingsByStatus" -> statusCounts;
+                        case "findTopResources" -> {
+                            requestedPageable = (Pageable) args[0];
+                            yield topResources;
                         }
                         case "toString" -> "BookingRepositoryStub";
                         default -> throw new UnsupportedOperationException(
@@ -152,6 +204,52 @@ class BookingServiceTest {
 
         private int saveCount() {
             return saveCount;
+        }
+
+        private void setStatistics(
+                long totalCount,
+                List<BookingCountByStatusProjection> statusCounts,
+                List<TopResourceProjection> topResources
+        ) {
+            this.totalCount = totalCount;
+            this.statusCounts = statusCounts;
+            this.topResources = topResources;
+        }
+
+        private Pageable requestedPageable() {
+            return requestedPageable;
+        }
+    }
+
+    private record BookingCountByStatusProjectionStub(
+            BookingStatus status,
+            Long bookingCount
+    ) implements BookingCountByStatusProjection {
+
+        @Override
+        public BookingStatus getStatus() {
+            return status;
+        }
+
+        @Override
+        public Long getBookingCount() {
+            return bookingCount;
+        }
+    }
+
+    private record TopResourceProjectionStub(
+            Long resourceId,
+            Long bookingCount
+    ) implements TopResourceProjection {
+
+        @Override
+        public Long getResourceId() {
+            return resourceId;
+        }
+
+        @Override
+        public Long getBookingCount() {
+            return bookingCount;
         }
     }
 }

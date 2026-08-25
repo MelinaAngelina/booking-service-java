@@ -3,6 +3,7 @@ package com.booking.service.controller;
 import com.booking.service.dto.request.CreateBookingRequest;
 import com.booking.service.dto.request.GetBookingsByFilterRequest;
 import com.booking.service.dto.response.BookingResponse;
+import com.booking.service.dto.response.BookingStatisticsResponse;
 import com.booking.service.entity.Booking;
 import com.booking.service.entity.BookingStatus;
 import com.booking.service.service.BookingService;
@@ -24,6 +25,16 @@ public class BookingController {
 
     private final BookingService bookingService;
     private final BookingMapper mapper;
+
+    /**
+     * Получить агрегированную статистику по бронированиям.
+     *
+     * @return статистика по бронированиям
+     */
+    @GetMapping("/statistics")
+    public BookingStatisticsResponse getStatistics() {
+        return bookingService.getStatistics();
+    }
 
     /**
      * Создать новое бронирование
