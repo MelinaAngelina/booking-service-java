@@ -20,12 +20,15 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+
+import static java.time.ZoneOffset.UTC;
 
 /**
  * Сервис для работы с бронированиями
@@ -144,29 +147,42 @@ public class BookingService {
      * Получить агрегированную статистику по бронированиям:
      * общее количество, количество по статусам и топ-5 ресурсов.
      *
+     * @param dateFrom начало периода включительно
+     * @param dateTo окончание периода включительно
      * @return статистика по бронированиям
      */
     @Transactional(readOnly = true)
-    public BookingStatisticsResponse getStatistics() {
-        long totalCount = bookingRepository.count();
+    public BookingStatisticsResponse getStatistics(LocalDate dateFrom, LocalDate dateTo) {
+        OffsetDateTime periodStart = dateFrom.atStartOfDay().atOffset(UTC);
+        OffsetDateTime periodEnd = dateTo.atTime(LocalTime.MAX).atOffset(UTC);
+
+        long totalCount = bookingRepository.countBookingsWithinPeriod(periodStart, periodEnd);
 
         List<BookingCountByStatusProjection> statusCounts =
-                bookingRepository.countBookingsByStatus();
+                bookingRepository.countBookingsByStatus(periodStart, periodEnd);
 
         Map<BookingStatus, Long> countByStatus =
                 new EnumMap<>(BookingStatus.class);
 
+        for (BookingStatus status : BookingStatus.values()) {
+            if (status != BookingStatus.NONE) {
+                countByStatus.put(status, 0L);
+            }
+        }
+
         for (BookingCountByStatusProjection statusCount : statusCounts) {
-            countByStatus.put(
-                    statusCount.getStatus(),
-                    statusCount.getBookingCount()
-            );
+            if (statusCount.getStatus() != BookingStatus.NONE) {
+                countByStatus.put(
+                        statusCount.getStatus(),
+                        statusCount.getBookingCount()
+                );
+            }
         }
 
         Pageable topFive = PageRequest.of(0, 5);
 
         List<TopResourceProjection> topResourceProjections =
-                bookingRepository.findTopResources(topFive);
+                bookingRepository.findTopResources(periodStart, periodEnd, topFive);
 
         List<TopResourceResponse> topResources = new ArrayList<>();
 

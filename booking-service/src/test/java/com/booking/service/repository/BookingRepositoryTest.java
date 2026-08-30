@@ -12,7 +12,6 @@ import org.springframework.test.context.TestExecutionListeners;
 import org.springframework.test.context.support.DependencyInjectionTestExecutionListener;
 import org.springframework.test.context.transaction.TransactionalTestExecutionListener;
 
-import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.EnumMap;
 import java.util.List;
@@ -34,7 +33,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 )
 class BookingRepositoryTest {
 
-    private static final OffsetDateTime NOW = OffsetDateTime.parse("2026-08-18T12:00:00+03:00");
+    private static final OffsetDateTime PERIOD_START = OffsetDateTime.parse("2026-08-10T00:00:00Z");
+    private static final OffsetDateTime PERIOD_END = OffsetDateTime.parse("2026-08-20T23:59:59.999999Z");
+    private static final OffsetDateTime INSIDE_PERIOD = OffsetDateTime.parse("2026-08-15T12:00:00Z");
 
     private final AtomicLong nextUserId = new AtomicLong(1L);
 
@@ -42,13 +43,26 @@ class BookingRepositoryTest {
     private BookingRepository bookingRepository;
 
     @Test
+    void countBookingsWithinPeriod_filtersByCreatedAtAndIncludesBoundaries() {
+        saveBookings(1L, BookingStatus.CONFIRMED, 1, PERIOD_START);
+        saveBookings(2L, BookingStatus.CONFIRMED, 1, PERIOD_END);
+        saveBookings(3L, BookingStatus.CONFIRMED, 1, PERIOD_START.minusNanos(1_000));
+        saveBookings(4L, BookingStatus.CONFIRMED, 1, PERIOD_END.plusNanos(1_000));
+
+        long result = bookingRepository.countBookingsWithinPeriod(PERIOD_START, PERIOD_END);
+
+        assertEquals(2L, result);
+    }
+
+    @Test
     void countBookingsByStatus_groupsBookingsByStatus() {
         saveBookings(10L, BookingStatus.CONFIRMED, 3);
         saveBookings(20L, BookingStatus.CANCELLED, 2);
         saveBookings(30L, BookingStatus.AWAIT_CONFIRMATION, 1);
+        saveBookings(40L, BookingStatus.CANCELLED, 5, PERIOD_START.minusDays(1));
 
         List<BookingCountByStatusProjection> projections =
-                bookingRepository.countBookingsByStatus();
+                bookingRepository.countBookingsByStatus(PERIOD_START, PERIOD_END);
 
         Map<BookingStatus, Long> counts = new EnumMap<>(BookingStatus.class);
         projections.forEach(projection ->
@@ -67,9 +81,10 @@ class BookingRepositoryTest {
         saveBookings(1L, BookingStatus.CONFIRMED, 2);
         saveBookings(3L, BookingStatus.CONFIRMED, 1);
         saveBookings(4L, BookingStatus.CONFIRMED, 1);
+        saveBookings(99L, BookingStatus.CONFIRMED, 10, PERIOD_END.plusDays(1));
 
         List<TopResourceProjection> result =
-                bookingRepository.findTopResources(PageRequest.of(0, 5));
+                bookingRepository.findTopResources(PERIOD_START, PERIOD_END, PageRequest.of(0, 5));
 
         assertEquals(List.of(2L, 7L, 9L, 1L, 3L),
                 result.stream().map(TopResourceProjection::getResourceId).toList());
@@ -78,27 +93,36 @@ class BookingRepositoryTest {
     }
 
     private void saveBookings(Long resourceId, BookingStatus status, int count) {
+        saveBookings(resourceId, status, count, INSIDE_PERIOD);
+    }
+
+    private void saveBookings(
+            Long resourceId,
+            BookingStatus status,
+            int count,
+            OffsetDateTime createdAt
+    ) {
         for (int i = 0; i < count; i++) {
             Booking booking = Booking.create(
                     nextUserId.getAndIncrement(),
                     resourceId,
-                    LocalDate.of(2026, 8, 20),
-                    LocalDate.of(2026, 8, 22),
-                    NOW
+                    createdAt.toLocalDate().plusDays(10),
+                    createdAt.toLocalDate().plusDays(12),
+                    createdAt
             );
-            changeStatus(booking, status);
+            changeStatus(booking, status, createdAt);
             bookingRepository.save(booking);
         }
     }
 
-    private void changeStatus(Booking booking, BookingStatus status) {
+    private void changeStatus(Booking booking, BookingStatus status, OffsetDateTime createdAt) {
         switch (status) {
             case AWAIT_CONFIRMATION -> {
                 // Booking.create already assigns this status.
             }
             case CONFIRMED -> booking.confirm();
-            case CANCELLED -> booking.cancel(NOW.toLocalDate());
-            case CANCELLATION_PENDING -> booking.beginCancellation(NOW);
+            case CANCELLED -> booking.cancel(createdAt.toLocalDate());
+            case CANCELLATION_PENDING -> booking.beginCancellation(createdAt);
             case NONE -> throw new IllegalArgumentException("NONE is not a valid persisted status");
         }
     }

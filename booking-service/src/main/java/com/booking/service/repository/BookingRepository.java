@@ -10,6 +10,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -55,23 +56,48 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
     BookingStatus findStatusById(@Param("id") Long id);
 
     /**
-     * Получить количество бронирований с группировкой по статусу.
+     * Получить общее количество бронирований, созданных за указанный период.
      *
+     * @param dateFrom начало периода включительно
+     * @param dateTo окончание периода включительно
+     * @return количество бронирований
+     */
+    @Query("""
+        SELECT COUNT(b)
+        FROM Booking b
+        WHERE b.createdAt >= :dateFrom
+          AND b.createdAt <= :dateTo
+        """)
+    long countBookingsWithinPeriod(@Param("dateFrom") OffsetDateTime dateFrom,
+                                   @Param("dateTo") OffsetDateTime dateTo);
+
+    /**
+     * Получить количество бронирований за период с группировкой по статусу.
+     *
+     * @param dateFrom начало периода включительно
+     * @param dateTo окончание периода включительно
      * @return список статусов и количества бронирований для каждого статуса
      */
     @Query("""
         SELECT b.status AS status,
                COUNT(b) AS bookingCount
         FROM Booking b
+        WHERE b.createdAt >= :dateFrom
+          AND b.createdAt <= :dateTo
         GROUP BY b.status
         """)
-    List<BookingCountByStatusProjection> countBookingsByStatus();
+    List<BookingCountByStatusProjection> countBookingsByStatus(
+            @Param("dateFrom") OffsetDateTime dateFrom,
+            @Param("dateTo") OffsetDateTime dateTo
+    );
 
     /**
      * Получить ресурсы, отсортированные по количеству бронирований.
      * При одинаковом количестве бронирований ресурсы сортируются по идентификатору.
      * Количество возвращаемых ресурсов ограничивается параметрами пагинации.
      *
+     * @param dateFrom начало периода включительно
+     * @param dateTo окончание периода включительно
      * @param pageable параметры ограничения количества результатов
      * @return список ресурсов и количества их бронирований
      */
@@ -79,8 +105,14 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
         SELECT b.resourceId AS resourceId,
                COUNT(b) AS bookingCount
         FROM Booking b
+        WHERE b.createdAt >= :dateFrom
+          AND b.createdAt <= :dateTo
         GROUP BY b.resourceId
         ORDER BY COUNT(b) DESC, b.resourceId ASC
         """)
-    List<TopResourceProjection> findTopResources(Pageable pageable);
+    List<TopResourceProjection> findTopResources(
+            @Param("dateFrom") OffsetDateTime dateFrom,
+            @Param("dateTo") OffsetDateTime dateTo,
+            Pageable pageable
+    );
 }

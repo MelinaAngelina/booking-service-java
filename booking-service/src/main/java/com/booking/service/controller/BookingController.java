@@ -6,12 +6,15 @@ import com.booking.service.dto.response.BookingResponse;
 import com.booking.service.dto.response.BookingStatisticsResponse;
 import com.booking.service.entity.Booking;
 import com.booking.service.entity.BookingStatus;
+import com.booking.service.exception.BusinessException;
 import com.booking.service.service.BookingService;
 import com.booking.service.service.mapper.BookingMapper;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDate;
 import java.util.List;
 
 /**
@@ -28,11 +31,21 @@ public class BookingController {
     /**
      * Получить агрегированную статистику по бронированиям.
      *
+     * @param dateFrom начало периода включительно
+     * @param dateTo окончание периода включительно
      * @return статистика по бронированиям
      */
     @GetMapping("/statistics")
-    public BookingStatisticsResponse getStatistics() {
-        return bookingService.getStatistics();
+    public BookingStatisticsResponse getStatistics(
+            @RequestParam("dateFrom")
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dateFrom,
+            @RequestParam("dateTo")
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dateTo
+    ) {
+        if (dateTo.isBefore(dateFrom)) {
+            throw new BusinessException("Дата окончания периода не может быть раньше даты начала");
+        }
+        return bookingService.getStatistics(dateFrom, dateTo);
     }
 
     /**

@@ -15,6 +15,7 @@ import org.springframework.data.domain.Pageable;
 
 import java.lang.reflect.Proxy;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.util.HashMap;
 import java.util.List;
@@ -25,11 +26,14 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static java.time.ZoneOffset.UTC;
 
 class BookingServiceTest {
 
     private static final OffsetDateTime NOW = OffsetDateTime.parse("2026-08-18T12:00:00+03:00");
     private static final UUID REQUEST_ID = UUID.fromString("10000000-0000-0000-0000-000000000001");
+    private static final LocalDate DATE_FROM = LocalDate.of(2026, 8, 1);
+    private static final LocalDate DATE_TO = LocalDate.of(2026, 8, 31);
 
     private BookingRepositoryStub repositoryStub;
     private RecordingBookingEventPublisher eventPublisher;
@@ -102,7 +106,8 @@ class BookingServiceTest {
                 10L,
                 List.of(
                         new BookingCountByStatusProjectionStub(BookingStatus.CONFIRMED, 6L),
-                        new BookingCountByStatusProjectionStub(BookingStatus.CANCELLED, 4L)
+                        new BookingCountByStatusProjectionStub(BookingStatus.CANCELLED, 4L),
+                        new BookingCountByStatusProjectionStub(BookingStatus.NONE, 99L)
                 ),
                 List.of(
                         new TopResourceProjectionStub(2L, 5L),
@@ -110,13 +115,18 @@ class BookingServiceTest {
                 )
         );
 
-        BookingStatisticsResponse result = bookingService.getStatistics();
+        BookingStatisticsResponse result = bookingService.getStatistics(DATE_FROM, DATE_TO);
 
         assertEquals(10L, result.totalCount());
         assertEquals(6L, result.countByStatus().get(BookingStatus.CONFIRMED));
         assertEquals(4L, result.countByStatus().get(BookingStatus.CANCELLED));
+        assertEquals(0L, result.countByStatus().get(BookingStatus.AWAIT_CONFIRMATION));
+        assertEquals(0L, result.countByStatus().get(BookingStatus.CANCELLATION_PENDING));
+        assertEquals(4, result.countByStatus().size());
         assertEquals(2, result.topResources().size());
         assertEquals(new TopResourceResponse(2L, 5L), result.topResources().get(0));
+        assertEquals(DATE_FROM.atStartOfDay().atOffset(UTC), repositoryStub.requestedDateFrom());
+        assertEquals(DATE_TO.atTime(LocalTime.MAX).atOffset(UTC), repositoryStub.requestedDateTo());
         assertEquals(0, repositoryStub.requestedPageable().getPageNumber());
         assertEquals(5, repositoryStub.requestedPageable().getPageSize());
     }
@@ -125,10 +135,15 @@ class BookingServiceTest {
     void getStatistics_forEmptyRepository_returnsEmptyStatistics() {
         repositoryStub.setStatistics(0L, List.of(), List.of());
 
-        BookingStatisticsResponse result = bookingService.getStatistics();
+        BookingStatisticsResponse result = bookingService.getStatistics(DATE_FROM, DATE_TO);
 
         assertEquals(0L, result.totalCount());
-        assertEquals(Map.of(), result.countByStatus());
+        assertEquals(Map.of(
+                BookingStatus.AWAIT_CONFIRMATION, 0L,
+                BookingStatus.CONFIRMED, 0L,
+                BookingStatus.CANCELLED, 0L,
+                BookingStatus.CANCELLATION_PENDING, 0L
+        ), result.countByStatus());
         assertEquals(List.of(), result.topResources());
     }
 
@@ -169,6 +184,8 @@ class BookingServiceTest {
         private long totalCount;
         private List<BookingCountByStatusProjection> statusCounts = List.of();
         private List<TopResourceProjection> topResources = List.of();
+        private OffsetDateTime requestedDateFrom;
+        private OffsetDateTime requestedDateTo;
         private Pageable requestedPageable;
 
         private BookingRepository repository() {
@@ -184,10 +201,14 @@ class BookingServiceTest {
                             saveCount++;
                             yield args[0];
                         }
-                        case "count" -> totalCount;
+                        case "countBookingsWithinPeriod" -> {
+                            requestedDateFrom = (OffsetDateTime) args[0];
+                            requestedDateTo = (OffsetDateTime) args[1];
+                            yield totalCount;
+                        }
                         case "countBookingsByStatus" -> statusCounts;
                         case "findTopResources" -> {
-                            requestedPageable = (Pageable) args[0];
+                            requestedPageable = (Pageable) args[2];
                             yield topResources;
                         }
                         case "toString" -> "BookingRepositoryStub";
@@ -218,6 +239,14 @@ class BookingServiceTest {
 
         private Pageable requestedPageable() {
             return requestedPageable;
+        }
+
+        private OffsetDateTime requestedDateFrom() {
+            return requestedDateFrom;
+        }
+
+        private OffsetDateTime requestedDateTo() {
+            return requestedDateTo;
         }
     }
 
