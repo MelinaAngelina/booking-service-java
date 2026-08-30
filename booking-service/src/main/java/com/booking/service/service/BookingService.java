@@ -1,6 +1,8 @@
 package com.booking.service.service;
 
 import com.booking.service.config.CurrentDateTimeProvider;
+import com.booking.service.dto.response.BookingStatisticsResponse;
+import com.booking.service.dto.response.TopResourceResponse;
 import com.booking.service.entity.Booking;
 import com.booking.service.entity.BookingStatus;
 import com.booking.service.exception.BusinessException;
@@ -8,6 +10,8 @@ import com.booking.service.messaging.contracts.CancelBookingJobByRequestIdReques
 import com.booking.service.messaging.contracts.CreateBookingJobRequest;
 import com.booking.service.messaging.listener.BookingEventPublisher;
 import com.booking.service.repository.BookingRepository;
+import com.booking.service.repository.projection.BookingCountByStatusProjection;
+import com.booking.service.repository.projection.TopResourceProjection;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.PageRequest;
@@ -16,8 +20,15 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+
+import static java.time.ZoneOffset.UTC;
 
 /**
  * Сервис для работы с бронированиями
@@ -73,8 +84,8 @@ public class BookingService {
         Booking booking = bookingRepository.findById(id)
                 .orElseThrow(() -> new BusinessException("Бронирование с указанным id: '" + id + "' не найдено."));
 
-        LocalDate currentDate = LocalDate.from(dateTimeProvider.utcNow());
-        booking.cancel(currentDate);
+        OffsetDateTime now = dateTimeProvider.utcNow();
+        booking.beginCancellation(now);
 
         bookingRepository.save(booking);
 
@@ -87,7 +98,7 @@ public class BookingService {
             bookingEventPublisher.publishCancelBookingJob(command);
         }
 
-        log.info("Отменено бронирование с ID: {}", id);
+        log.info("Запущена отмена бронирования с ID: {}", id);
     }
 
     // === ЗАПРОСЫ (Queries) ===
@@ -130,6 +141,65 @@ public class BookingService {
     @Transactional(readOnly = true)
     public BookingStatus getStatusById(Long id) {
         return bookingRepository.findStatusById(id);
+    }
+
+    /**
+     * Получить агрегированную статистику по бронированиям:
+     * общее количество, количество по статусам и топ-5 ресурсов.
+     *
+     * @param dateFrom начало периода включительно
+     * @param dateTo окончание периода включительно
+     * @return статистика по бронированиям
+     */
+    @Transactional(readOnly = true)
+    public BookingStatisticsResponse getStatistics(LocalDate dateFrom, LocalDate dateTo) {
+        OffsetDateTime periodStart = dateFrom.atStartOfDay().atOffset(UTC);
+        OffsetDateTime periodEnd = dateTo.atTime(LocalTime.MAX).atOffset(UTC);
+
+        long totalCount = bookingRepository.countBookingsWithinPeriod(periodStart, periodEnd);
+
+        List<BookingCountByStatusProjection> statusCounts =
+                bookingRepository.countBookingsByStatus(periodStart, periodEnd);
+
+        Map<BookingStatus, Long> countByStatus =
+                new EnumMap<>(BookingStatus.class);
+
+        for (BookingStatus status : BookingStatus.values()) {
+            if (status != BookingStatus.NONE) {
+                countByStatus.put(status, 0L);
+            }
+        }
+
+        for (BookingCountByStatusProjection statusCount : statusCounts) {
+            if (statusCount.getStatus() != BookingStatus.NONE) {
+                countByStatus.put(
+                        statusCount.getStatus(),
+                        statusCount.getBookingCount()
+                );
+            }
+        }
+
+        Pageable topFive = PageRequest.of(0, 5);
+
+        List<TopResourceProjection> topResourceProjections =
+                bookingRepository.findTopResources(periodStart, periodEnd, topFive);
+
+        List<TopResourceResponse> topResources = new ArrayList<>();
+
+        for (TopResourceProjection projection : topResourceProjections) {
+            topResources.add(
+                    new TopResourceResponse(
+                            projection.getResourceId(),
+                            projection.getBookingCount()
+                    )
+            );
+        }
+
+        return new BookingStatisticsResponse(
+                totalCount,
+                countByStatus,
+                topResources
+        );
     }
 
     // === EVENT HANDLERS (Обработка асинхронных событий от Catalog Service) ===
@@ -195,5 +265,25 @@ public class BookingService {
     @Transactional
     public void handleError(UUID requestId) {
         log.info("Получено событие ошибки из DLQ: requestId={}", requestId);
+
+        Booking booking = bookingRepository.findByCatalogRequestId(requestId).orElse(null);
+
+        if (booking == null) {
+            log.warn("Бронирование не найдено по requestId: {}. Событие проигнорировано.", requestId);
+            return;
+        }
+
+        if (booking.getStatus() != BookingStatus.CANCELLATION_PENDING) {
+            log.warn(
+                    "Бронирование id={} находится в статусе {}. Откат отмены не требуется, событие проигнорировано.",
+                    booking.getId(),
+                    booking.getStatus()
+            );
+            return;
+        }
+        booking.rollbackCancellation();
+        bookingRepository.save(booking);
+        log.info("Rollback успешно выполнен: id={}, новый статус={}",
+                booking.getId(), booking.getStatus());
     }
 }
