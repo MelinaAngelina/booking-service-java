@@ -95,13 +95,15 @@ public class Booking {
     }
 
     /**
-     * Подтвердить бронирование (переход из AwaitConfirmation в Confirmed)
+     * Принять подтверждение Catalog, в том числе если локально уже началась отмена.
      */
     public void confirm() {
-        if (status != BookingStatus.AWAIT_CONFIRMATION) {
-            throw new BusinessException("Статус заявки некорректен, заявка должна быть в статусе " + BookingStatus.AWAIT_CONFIRMATION);
+        if (status != BookingStatus.AWAIT_CONFIRMATION && status != BookingStatus.CANCELLATION_PENDING) {
+            throw new BusinessException("Подтверждение допустимо только при ожидании подтверждения или отмены");
         }
         this.status = BookingStatus.CONFIRMED;
+        this.previousStatus = null;
+        this.commandSentAt = null;
     }
 
 

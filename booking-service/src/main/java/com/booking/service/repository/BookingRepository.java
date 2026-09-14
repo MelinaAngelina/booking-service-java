@@ -29,6 +29,15 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
     Optional<Booking> findByCatalogRequestId(UUID catalogRequestId);
 
     /**
+     * Найти бронирования с указанным статусом и временем отправки команды строго раньше порога.
+     *
+     * @param status статус бронирования
+     * @param cutoff граница истечения таймаута
+     * @return бронирования, ожидающие повторной отправки команды
+     */
+    List<Booking> findByStatusAndCommandSentAtBefore(BookingStatus status, OffsetDateTime cutoff);
+
+    /**
      * Найти бронирования по фильтрам с пагинацией
      * Используется для получения списка бронирований с опциональными фильтрами
      *

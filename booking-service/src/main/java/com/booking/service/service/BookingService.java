@@ -223,6 +223,10 @@ public class BookingService {
         log.info("Найдено бронирование: id={}, статус={}. Подтверждаем...",
                 booking.getId(), booking.getStatus());
 
+        if (booking.getStatus() == BookingStatus.CANCELLATION_PENDING) {
+            log.warn("Race condition: подтверждение Catalog пришло во время отмены бронирования id={}, requestId={}. Принимаем подтверждение.",
+                    booking.getId(), requestId);
+        }
         booking.confirm();
         bookingRepository.save(booking);
 

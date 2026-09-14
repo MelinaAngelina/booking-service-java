@@ -15,6 +15,37 @@ class BookingTest {
     private static final OffsetDateTime NOW = OffsetDateTime.parse("2026-08-18T12:00:00+03:00");
 
     @Test
+    void confirm_fromAwaitConfirmation_setsConfirmed() {
+        Booking booking = createBooking();
+        booking.confirm();
+        assertEquals(BookingStatus.CONFIRMED, booking.getStatus());
+        assertNull(booking.getPreviousStatus());
+        assertNull(booking.getCommandSentAt());
+    }
+
+    @Test
+    void confirm_duringCancellation_acceptsConfirmationAndClearsCancellationFields() {
+        Booking booking = createBooking();
+        booking.beginCancellation(NOW);
+
+        booking.confirm();
+
+        assertEquals(BookingStatus.CONFIRMED, booking.getStatus());
+        assertNull(booking.getPreviousStatus());
+        assertNull(booking.getCommandSentAt());
+    }
+
+    @Test
+    void confirm_fromCancelled_remainsForbidden() {
+        Booking booking = createBooking();
+        booking.beginCancellation(NOW);
+        booking.completeCancellation();
+
+        assertThrows(BusinessException.class, booking::confirm);
+        assertEquals(BookingStatus.CANCELLED, booking.getStatus());
+    }
+
+    @Test
     void beginCancellation_fromAwaitConfirmation_setsPendingState() {
         Booking booking = createBooking();
 

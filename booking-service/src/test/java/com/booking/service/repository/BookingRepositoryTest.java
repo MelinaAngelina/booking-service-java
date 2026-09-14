@@ -43,6 +43,26 @@ class BookingRepositoryTest {
     private BookingRepository bookingRepository;
 
     @Test
+    void findStuckCancellations_usesCommandTimeAndExcludesFreshAndFinishedBookings() {
+        OffsetDateTime cutoff = INSIDE_PERIOD;
+        saveBookings(1L, BookingStatus.CANCELLATION_PENDING, 1, cutoff.minusSeconds(1));
+        saveBookings(2L, BookingStatus.CANCELLATION_PENDING, 1, cutoff);
+        saveBookings(3L, BookingStatus.CANCELLATION_PENDING, 1, cutoff.plusSeconds(1));
+        saveBookings(4L, BookingStatus.CONFIRMED, 1, cutoff.minusDays(1));
+        saveBookings(5L, BookingStatus.CANCELLED, 1, cutoff.minusDays(1));
+        saveBookings(6L, BookingStatus.AWAIT_CONFIRMATION, 1, cutoff.minusDays(1));
+        Booking oldBookingWithRecentCancellation = Booking.create(1L, 7L,
+                cutoff.toLocalDate().plusDays(1), cutoff.toLocalDate().plusDays(2), cutoff.minusDays(1));
+        oldBookingWithRecentCancellation.beginCancellation(cutoff.plusSeconds(1));
+        bookingRepository.saveAndFlush(oldBookingWithRecentCancellation);
+
+        List<Booking> result = bookingRepository.findByStatusAndCommandSentAtBefore(
+                BookingStatus.CANCELLATION_PENDING, cutoff);
+
+        assertEquals(List.of(1L), result.stream().map(Booking::getResourceId).toList());
+    }
+
+    @Test
     void countBookingsWithinPeriod_filtersByCreatedAtAndIncludesBoundaries() {
         saveBookings(1L, BookingStatus.CONFIRMED, 1, PERIOD_START);
         saveBookings(2L, BookingStatus.CONFIRMED, 1, PERIOD_END);

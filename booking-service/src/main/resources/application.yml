@@ -23,6 +23,12 @@ springdoc:
 server:
   port: 8001
 
+# Повторяем отмену после пяти минут ожидания, проверяя раз в минуту.
+booking:
+  cancellation-retry:
+    timeout: PT5M
+    fixed-delay: PT1M
+
 # RabbitMQ Rebus Integration
 rabbitmq:
   rebus:

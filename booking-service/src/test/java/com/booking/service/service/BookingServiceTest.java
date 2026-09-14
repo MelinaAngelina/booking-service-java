@@ -1,5 +1,11 @@
 package com.booking.service.service;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import org.slf4j.LoggerFactory;
+
 import com.booking.service.dto.response.BookingStatisticsResponse;
 import com.booking.service.dto.response.TopResourceResponse;
 import com.booking.service.entity.Booking;
@@ -26,6 +32,7 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static java.time.ZoneOffset.UTC;
 
 class BookingServiceTest {
@@ -44,6 +51,32 @@ class BookingServiceTest {
         repositoryStub = new BookingRepositoryStub();
         eventPublisher = new RecordingBookingEventPublisher();
         bookingService = new BookingService(repositoryStub.repository(), eventPublisher, () -> NOW);
+    }
+
+    @Test
+    void confirmationDuringCancellation_logsWarningAndIgnoresLaterDlqRollback() {
+        Booking booking = createBooking();
+        booking.beginCancellation(NOW);
+        repositoryStub.add(1L, booking);
+        Logger logger = (Logger) LoggerFactory.getLogger(BookingService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            bookingService.handleBookingJobConfirmed(REQUEST_ID);
+            assertTrue(appender.list.stream().anyMatch(event ->
+                    event.getLevel() == Level.WARN && event.getFormattedMessage().contains("Race condition")));
+            assertEquals(BookingStatus.CONFIRMED, booking.getStatus());
+            assertNull(booking.getPreviousStatus());
+            assertNull(booking.getCommandSentAt());
+
+            bookingService.handleError(REQUEST_ID);
+            assertEquals(BookingStatus.CONFIRMED, booking.getStatus());
+            assertEquals(1, repositoryStub.saveCount());
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
     }
 
     @Test
