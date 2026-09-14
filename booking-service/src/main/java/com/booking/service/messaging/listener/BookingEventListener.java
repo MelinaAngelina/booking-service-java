@@ -78,6 +78,7 @@ public class BookingEventListener {
                 }
             } catch (Exception e) {
                 log.error("Ошибка обработки DLQ сообщения: type={}, payload={}", messageType, payload, e);
+                throw new RuntimeException("Failed to process cancellation error: " + messageType, e);
             }
         };
     }
