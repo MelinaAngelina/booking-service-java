@@ -2,18 +2,22 @@ package com.booking.service.service;
 
 import com.booking.service.config.CurrentDateTimeProvider;
 import com.booking.service.dto.response.BookingStatisticsResponse;
+import com.booking.service.dto.response.BookingStatusHistoryResponse;
 import com.booking.service.dto.response.TopResourceResponse;
 import com.booking.service.entity.Booking;
 import com.booking.service.entity.BookingStatus;
+import com.booking.service.entity.BookingStatusHistory;
 import com.booking.service.exception.BusinessException;
 import com.booking.service.messaging.contracts.CancelBookingJobByRequestIdRequest;
 import com.booking.service.messaging.contracts.CreateBookingJobRequest;
 import com.booking.service.messaging.listener.BookingEventPublisher;
 import com.booking.service.repository.BookingRepository;
+import com.booking.service.repository.BookingStatusHistoryRepository;
 import com.booking.service.repository.projection.BookingCountByStatusProjection;
 import com.booking.service.repository.projection.TopResourceProjection;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -42,6 +46,7 @@ public class BookingService {
 
     private final BookingRepository bookingRepository;
     private final BookingEventPublisher bookingEventPublisher;
+    private final BookingStatusHistoryRepository bookingStatusHistoryRepository;
     private final CurrentDateTimeProvider dateTimeProvider;
 
     // === КОМАНДЫ (Use Cases) ===
@@ -59,6 +64,13 @@ public class BookingService {
         booking.setCatalogRequestId(requestId);
 
         booking = bookingRepository.save(booking);
+
+        saveHistory(
+                booking,
+                null,
+                "Бронирование создано",
+                String.valueOf(userId)
+        );
 
         CreateBookingJobRequest command = new CreateBookingJobRequest(
                 UUID.randomUUID(),
@@ -85,9 +97,17 @@ public class BookingService {
                 .orElseThrow(() -> new BusinessException("Бронирование с указанным id: '" + id + "' не найдено."));
 
         OffsetDateTime now = dateTimeProvider.utcNow();
+        BookingStatus previousStatus = booking.getStatus();
         booking.beginCancellation(now);
 
         bookingRepository.save(booking);
+
+        saveHistory(
+                booking,
+                previousStatus,
+                "Пользователь запросил отмену",
+                String.valueOf(booking.getUserId())
+        );
 
         if (booking.getCatalogRequestId() != null) {
             CancelBookingJobByRequestIdRequest command = new CancelBookingJobByRequestIdRequest(
@@ -113,6 +133,49 @@ public class BookingService {
     public Booking getById(Long id) {
         return bookingRepository.findById(id)
                 .orElseThrow(() -> new BusinessException("Бронирование с указанным id: '" + id + "' не найдено."));
+    }
+
+    /**
+     * Получить историю бронирования: новые записи первыми.
+     * При одинаковом времени записи упорядочиваются по ID по убыванию.
+     *
+     * @param bookingId идентификатор бронирования
+     * @param page номер страницы, начиная с нуля
+     * @param size положительный размер страницы
+     * @return страница истории с общим количеством записей и страниц
+     */
+    @Transactional(readOnly = true)
+    public Page<BookingStatusHistoryResponse> getHistory(
+            Long bookingId,
+            int page,
+            int size
+    ) {
+        if (page < 0 || size <= 0) {
+            throw new BusinessException(
+                    "Номер страницы должен быть неотрицательным, а размер — положительным"
+            );
+        }
+
+        getById(bookingId);
+
+        Pageable pageable = PageRequest.of(page, size);
+
+        Page<BookingStatusHistory> history =
+                bookingStatusHistoryRepository
+                        .findByBookingIdOrderByChangedAtDescIdDesc(
+                                bookingId,
+                                pageable
+                        );
+
+        return history.map(entry -> new BookingStatusHistoryResponse(
+                entry.getId(),
+                entry.getBookingId(),
+                entry.getPreviousStatus(),
+                entry.getNewStatus(),
+                entry.getChangedAt(),
+                entry.getReason(),
+                entry.getInitiator()
+        ));
     }
 
     /**
@@ -227,8 +290,17 @@ public class BookingService {
             log.warn("Race condition: подтверждение Catalog пришло во время отмены бронирования id={}, requestId={}. Принимаем подтверждение.",
                     booking.getId(), requestId);
         }
+        BookingStatus previousStatus = booking.getStatus();
+
         booking.confirm();
         bookingRepository.save(booking);
+
+        saveHistory(
+                booking,
+                previousStatus,
+                "Получено подтверждение Catalog",
+                "System"
+        );
 
         log.info("Бронирование успешно подтверждено: id={}, новый статус={}",
                 booking.getId(), booking.getStatus());
@@ -254,8 +326,17 @@ public class BookingService {
                 booking.getId(), booking.getStatus());
 
         LocalDate currentDate = LocalDate.from(dateTimeProvider.utcNow());
+        BookingStatus previousStatus = booking.getStatus();
+
         booking.cancel(currentDate);
         bookingRepository.save(booking);
+
+        saveHistory(
+                booking,
+                previousStatus,
+                "Получено событие отказа Catalog",
+                "System"
+        );
 
         log.info("Бронирование успешно отменено: id={}, новый статус={}",
                 booking.getId(), booking.getStatus());
@@ -285,9 +366,40 @@ public class BookingService {
             );
             return;
         }
+        BookingStatus previousStatus = booking.getStatus();
+
         booking.rollbackCancellation();
         bookingRepository.save(booking);
+
+        saveHistory(
+                booking,
+                previousStatus,
+                "Отмена не выполнена: получена ошибка из DLQ, статус восстановлен",
+                "System"
+        );
         log.info("Rollback успешно выполнен: id={}, новый статус={}",
                 booking.getId(), booking.getStatus());
+    }
+
+    /**
+     * Добавить запись аудита в текущей транзакции изменения бронирования.
+     * При создании previousStatus равен null; автоматический инициатор — "System".
+     */
+    private void saveHistory(
+            Booking booking,
+            BookingStatus previousStatus,
+            String reason,
+            String initiator
+    ) {
+        BookingStatusHistory history = new BookingStatusHistory(
+                booking.getId(),
+                previousStatus,
+                booking.getStatus(),
+                dateTimeProvider.utcNow(),
+                reason,
+                initiator
+        );
+
+        bookingStatusHistoryRepository.save(history);
     }
 }

@@ -10,19 +10,25 @@ import com.booking.service.dto.response.BookingStatisticsResponse;
 import com.booking.service.dto.response.TopResourceResponse;
 import com.booking.service.entity.Booking;
 import com.booking.service.entity.BookingStatus;
+import com.booking.service.entity.BookingStatusHistory;
+import com.booking.service.exception.BusinessException;
 import com.booking.service.messaging.contracts.CancelBookingJobByRequestIdRequest;
+import com.booking.service.messaging.contracts.CreateBookingJobRequest;
 import com.booking.service.messaging.listener.BookingEventPublisher;
 import com.booking.service.repository.BookingRepository;
+import com.booking.service.repository.BookingStatusHistoryRepository;
 import com.booking.service.repository.projection.BookingCountByStatusProjection;
 import com.booking.service.repository.projection.TopResourceProjection;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.domain.Pageable;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.lang.reflect.Proxy;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static java.time.ZoneOffset.UTC;
 
 class BookingServiceTest {
@@ -44,13 +51,101 @@ class BookingServiceTest {
 
     private BookingRepositoryStub repositoryStub;
     private RecordingBookingEventPublisher eventPublisher;
+    private HistoryRepositoryStub historyRepositoryStub;
     private BookingService bookingService;
 
     @BeforeEach
     void setUp() {
         repositoryStub = new BookingRepositoryStub();
         eventPublisher = new RecordingBookingEventPublisher();
-        bookingService = new BookingService(repositoryStub.repository(), eventPublisher, () -> NOW);
+        historyRepositoryStub = new HistoryRepositoryStub();
+        bookingService = new BookingService(
+                repositoryStub.repository(),
+                eventPublisher,
+                historyRepositoryStub.repository(),
+                () -> NOW
+        );
+    }
+
+    @Test
+    void createBooking_recordsInitialStatusAndUser() {
+        Long id = bookingService.createBooking(7L, 2L,
+                NOW.toLocalDate().plusDays(1), NOW.toLocalDate().plusDays(2));
+
+        assertNotNull(id);
+        assertNotNull(eventPublisher.publishedCreateCommand);
+        assertHistory(id, null, BookingStatus.AWAIT_CONFIRMATION,
+                "Бронирование создано", "7");
+    }
+
+    @Test
+    void confirmation_recordsSystemTransition() {
+        repositoryStub.add(42L, createBooking());
+
+        bookingService.handleBookingJobConfirmed(REQUEST_ID);
+
+        assertHistory(42L, BookingStatus.AWAIT_CONFIRMATION, BookingStatus.CONFIRMED,
+                "Получено подтверждение Catalog", "System");
+    }
+
+    @Test
+    void denial_forAwaitingBooking_recordsCancellation() {
+        repositoryStub.add(42L, createBooking());
+
+        bookingService.handleBookingJobDenied(REQUEST_ID);
+
+        assertHistory(42L, BookingStatus.AWAIT_CONFIRMATION, BookingStatus.CANCELLED,
+                "Получено событие отказа Catalog", "System");
+    }
+
+    @Test
+    void cancellation_forConfirmedBooking_recordsActualOldStatus() {
+        Booking booking = createBooking();
+        booking.confirm();
+        repositoryStub.add(42L, booking);
+
+        bookingService.cancelBooking(42L);
+
+        assertHistory(42L, BookingStatus.CONFIRMED, BookingStatus.CANCELLATION_PENDING,
+                "Пользователь запросил отмену", "1");
+    }
+
+    @Test
+    void rollback_forPreviouslyConfirmedBooking_recordsRestoredStatus() {
+        Booking booking = createBooking();
+        booking.confirm();
+        booking.beginCancellation(NOW);
+        repositoryStub.add(42L, booking);
+
+        bookingService.handleError(REQUEST_ID);
+
+        assertHistory(42L, BookingStatus.CANCELLATION_PENDING, BookingStatus.CONFIRMED,
+                "Отмена не выполнена: получена ошибка из DLQ, статус восстановлен", "System");
+    }
+
+    @Test
+    void rejectedTransition_doesNotRecordHistory() {
+        Booking booking = createBooking();
+        booking.cancel(NOW.toLocalDate());
+        repositoryStub.add(42L, booking);
+
+        assertThrows(BusinessException.class, () -> bookingService.cancelBooking(42L));
+        assertThrows(BusinessException.class, () -> bookingService.handleBookingJobConfirmed(REQUEST_ID));
+        assertThrows(BusinessException.class, () -> bookingService.handleBookingJobDenied(REQUEST_ID));
+
+        assertTrue(historyRepositoryStub.saved.isEmpty());
+        assertEquals(0, repositoryStub.saveCount());
+    }
+
+    @Test
+    void unknownBooking_doesNotRecordHistory() {
+        assertThrows(BusinessException.class, () -> bookingService.cancelBooking(42L));
+        bookingService.handleBookingJobConfirmed(REQUEST_ID);
+        bookingService.handleBookingJobDenied(REQUEST_ID);
+        bookingService.handleError(REQUEST_ID);
+
+        assertTrue(historyRepositoryStub.saved.isEmpty());
+        assertEquals(0, repositoryStub.saveCount());
     }
 
     @Test
@@ -73,6 +168,8 @@ class BookingServiceTest {
             bookingService.handleError(REQUEST_ID);
             assertEquals(BookingStatus.CONFIRMED, booking.getStatus());
             assertEquals(1, repositoryStub.saveCount());
+            assertHistory(1L, BookingStatus.CANCELLATION_PENDING, BookingStatus.CONFIRMED,
+                    "Получено подтверждение Catalog", "System");
         } finally {
             logger.detachAppender(appender);
             appender.stop();
@@ -92,6 +189,15 @@ class BookingServiceTest {
         assertEquals(1, repositoryStub.saveCount());
         assertNotNull(eventPublisher.publishedCancelCommand());
         assertEquals(REQUEST_ID, eventPublisher.publishedCancelCommand().getRequestId());
+
+        assertEquals(1, historyRepositoryStub.saved.size());
+        BookingStatusHistory history = historyRepositoryStub.saved.getFirst();
+        assertEquals(1L, history.getBookingId());
+        assertEquals(BookingStatus.AWAIT_CONFIRMATION, history.getPreviousStatus());
+        assertEquals(BookingStatus.CANCELLATION_PENDING, history.getNewStatus());
+        assertEquals(NOW, history.getChangedAt());
+        assertEquals("Пользователь запросил отмену", history.getReason());
+        assertEquals("1", history.getInitiator());
     }
 
     @Test
@@ -106,6 +212,8 @@ class BookingServiceTest {
         assertNull(booking.getPreviousStatus());
         assertNull(booking.getCommandSentAt());
         assertEquals(1, repositoryStub.saveCount());
+        assertHistory(1L, BookingStatus.CANCELLATION_PENDING, BookingStatus.CANCELLED,
+                "Получено событие отказа Catalog", "System");
     }
 
     @Test
@@ -120,6 +228,8 @@ class BookingServiceTest {
         assertNull(booking.getPreviousStatus());
         assertNull(booking.getCommandSentAt());
         assertEquals(1, repositoryStub.saveCount());
+        assertHistory(1L, BookingStatus.CANCELLATION_PENDING, BookingStatus.AWAIT_CONFIRMATION,
+                "Отмена не выполнена: получена ошибка из DLQ, статус восстановлен", "System");
     }
 
     @Test
@@ -131,6 +241,7 @@ class BookingServiceTest {
 
         assertEquals(BookingStatus.AWAIT_CONFIRMATION, booking.getStatus());
         assertEquals(0, repositoryStub.saveCount());
+        assertTrue(historyRepositoryStub.saved.isEmpty());
     }
 
     @Test
@@ -180,6 +291,18 @@ class BookingServiceTest {
         assertEquals(List.of(), result.topResources());
     }
 
+    private void assertHistory(Long bookingId, BookingStatus previousStatus, BookingStatus newStatus,
+                               String reason, String initiator) {
+        assertEquals(1, historyRepositoryStub.saved.size());
+        BookingStatusHistory history = historyRepositoryStub.saved.getFirst();
+        assertEquals(bookingId, history.getBookingId());
+        assertEquals(previousStatus, history.getPreviousStatus());
+        assertEquals(newStatus, history.getNewStatus());
+        assertEquals(NOW, history.getChangedAt());
+        assertEquals(reason, history.getReason());
+        assertEquals(initiator, history.getInitiator());
+    }
+
     private Booking createBooking() {
         Booking booking = Booking.create(
                 1L,
@@ -195,9 +318,15 @@ class BookingServiceTest {
     private static final class RecordingBookingEventPublisher extends BookingEventPublisher {
 
         private CancelBookingJobByRequestIdRequest publishedCancelCommand;
+        private CreateBookingJobRequest publishedCreateCommand;
 
         private RecordingBookingEventPublisher() {
             super(null, null);
+        }
+
+        @Override
+        public void publishCreateBookingJob(CreateBookingJobRequest request) {
+            publishedCreateCommand = request;
         }
 
         @Override
@@ -232,7 +361,13 @@ class BookingServiceTest {
                                 .findFirst();
                         case "save" -> {
                             saveCount++;
-                            yield args[0];
+                            Booking booking = (Booking) args[0];
+                            if (booking.getId() == null) {
+                                long id = bookingsById.keySet().stream().mapToLong(Long::longValue)
+                                        .max().orElse(0L) + 1;
+                                add(id, booking);
+                            }
+                            yield booking;
                         }
                         case "countBookingsWithinPeriod" -> {
                             requestedDateFrom = (OffsetDateTime) args[0];
@@ -253,6 +388,7 @@ class BookingServiceTest {
         }
 
         private void add(Long id, Booking booking) {
+            ReflectionTestUtils.setField(booking, "id", id);
             bookingsById.put(id, booking);
         }
 
@@ -312,6 +448,31 @@ class BookingServiceTest {
         @Override
         public Long getBookingCount() {
             return bookingCount;
+        }
+    }
+
+    private static final class HistoryRepositoryStub {
+
+        private final List<BookingStatusHistory> saved = new ArrayList<>();
+
+        private BookingStatusHistoryRepository repository() {
+            return (BookingStatusHistoryRepository) Proxy.newProxyInstance(
+                    BookingStatusHistoryRepository.class.getClassLoader(),
+                    new Class<?>[]{BookingStatusHistoryRepository.class},
+                    (proxy, method, args) -> {
+                        if (method.getName().equals("save")) {
+                            BookingStatusHistory history =
+                                    (BookingStatusHistory) args[0];
+
+                            saved.add(history);
+                            return history;
+                        }
+
+                        throw new UnsupportedOperationException(
+                                "Метод не реализован в заглушке: " + method.getName()
+                        );
+                    }
+            );
         }
     }
 }

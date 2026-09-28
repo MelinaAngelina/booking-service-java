@@ -102,7 +102,7 @@ class BookingControllerTest {
         private LocalDate dateTo;
 
         private BookingServiceStub(BookingStatisticsResponse statistics) {
-            super(null, null, null);
+            super(null, null, null, null);
             this.statistics = statistics;
         }
 
