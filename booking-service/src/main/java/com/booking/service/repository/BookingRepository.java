@@ -2,13 +2,15 @@ package com.booking.service.repository;
 
 import com.booking.service.entity.Booking;
 import com.booking.service.entity.BookingStatus;
-import org.springframework.data.domain.Page;
+import com.booking.service.repository.projection.BookingCountByStatusProjection;
+import com.booking.service.repository.projection.TopResourceProjection;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -25,6 +27,15 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
      * @return Optional с бронированием или empty
      */
     Optional<Booking> findByCatalogRequestId(UUID catalogRequestId);
+
+    /**
+     * Найти бронирования с указанным статусом и временем отправки команды строго раньше порога.
+     *
+     * @param status статус бронирования
+     * @param cutoff граница истечения таймаута
+     * @return бронирования, ожидающие повторной отправки команды
+     */
+    List<Booking> findByStatusAndCommandSentAtBefore(BookingStatus status, OffsetDateTime cutoff);
 
     /**
      * Найти бронирования по фильтрам с пагинацией
@@ -52,4 +63,65 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
      */
     @Query("SELECT b.status FROM Booking b WHERE b.id = :id")
     BookingStatus findStatusById(@Param("id") Long id);
+
+    /**
+     * Получить общее количество бронирований, созданных за указанный период.
+     *
+     * @param dateFrom начало периода включительно
+     * @param dateTo окончание периода включительно
+     * @return количество бронирований
+     */
+    @Query("""
+        SELECT COUNT(b)
+        FROM Booking b
+        WHERE b.createdAt >= :dateFrom
+          AND b.createdAt <= :dateTo
+        """)
+    long countBookingsWithinPeriod(@Param("dateFrom") OffsetDateTime dateFrom,
+                                   @Param("dateTo") OffsetDateTime dateTo);
+
+    /**
+     * Получить количество бронирований за период с группировкой по статусу.
+     *
+     * @param dateFrom начало периода включительно
+     * @param dateTo окончание периода включительно
+     * @return список статусов и количества бронирований для каждого статуса
+     */
+    @Query("""
+        SELECT b.status AS status,
+               COUNT(b) AS bookingCount
+        FROM Booking b
+        WHERE b.createdAt >= :dateFrom
+          AND b.createdAt <= :dateTo
+        GROUP BY b.status
+        """)
+    List<BookingCountByStatusProjection> countBookingsByStatus(
+            @Param("dateFrom") OffsetDateTime dateFrom,
+            @Param("dateTo") OffsetDateTime dateTo
+    );
+
+    /**
+     * Получить ресурсы, отсортированные по количеству бронирований.
+     * При одинаковом количестве бронирований ресурсы сортируются по идентификатору.
+     * Количество возвращаемых ресурсов ограничивается параметрами пагинации.
+     *
+     * @param dateFrom начало периода включительно
+     * @param dateTo окончание периода включительно
+     * @param pageable параметры ограничения количества результатов
+     * @return список ресурсов и количества их бронирований
+     */
+    @Query("""
+        SELECT b.resourceId AS resourceId,
+               COUNT(b) AS bookingCount
+        FROM Booking b
+        WHERE b.createdAt >= :dateFrom
+          AND b.createdAt <= :dateTo
+        GROUP BY b.resourceId
+        ORDER BY COUNT(b) DESC, b.resourceId ASC
+        """)
+    List<TopResourceProjection> findTopResources(
+            @Param("dateFrom") OffsetDateTime dateFrom,
+            @Param("dateTo") OffsetDateTime dateTo,
+            Pageable pageable
+    );
 }
